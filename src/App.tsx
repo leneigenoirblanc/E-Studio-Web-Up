@@ -24,6 +24,10 @@ import { LabelsHubStudio } from './components/LabelsHubStudio';
 import { PrintersStudio } from './components/PrintersStudio';
 import { PrintJobsStudio } from './components/PrintJobsStudio';
 import { PrintingSettingsModal } from './components/PrintingSettingsModal';
+import { TemplatesHub } from './components/TemplatesHub';
+import { JobsWorkspace } from './components/JobsWorkspace';
+import { ActivityWorkspace } from './components/ActivityWorkspace';
+import { SettingsWorkspace } from './components/SettingsWorkspace';
 
 function AppContent() {
   const toast = useToast();
@@ -122,6 +126,32 @@ function AppContent() {
               onImportTemplate={handleImportTemplate}
             />
           )}
+
+          {(currentView === 'templates' || currentView === 'labels') && (
+            <TemplatesHub
+              onSelectToEdit={(tpl) => {
+                setActiveTemplate(tpl);
+                navigateTo('editor');
+              }}
+              onCreateNew={() => openModal('isWizardOpen')}
+            />
+          )}
+
+          {currentView === 'jobs' && (
+            <JobsWorkspace
+              onOpenEditorForTemplate={(tplName) => {
+                const found = templates.find((t) => t.name === tplName);
+                if (found) {
+                  setActiveTemplate(found);
+                  navigateTo('editor');
+                }
+              }}
+            />
+          )}
+
+          {currentView === 'activity' && <ActivityWorkspace />}
+
+          {currentView === 'settings' && <SettingsWorkspace />}
 
           {currentView === 'editor' && (activeTemplate || templates[0]) && (
             <TemplateEditor

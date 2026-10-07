@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "test": "tsx --test 'src/**/*.test.ts'",
     "start": "node server.ts",
     "build": "vite build",
     "lint": "tsc --noEmit",

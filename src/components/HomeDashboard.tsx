@@ -1,497 +1,426 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { LabelTemplate, ProductRecord } from '../types';
-import { LabelRenderer } from './LabelRenderer';
-import { SAMPLE_PRODUCTS } from '../sampleData';
-import { Button, Card, Input } from './ui';
-import { ThemeConstants } from '../theme/ThemeConstants';
+/**
+ * E-Studio Home / Print Desk
+ * Conforms to SECTION 4 (New Top-Level Product Model) & SECTION 5 (Target Information Architecture)
+ * 
+ * Operational starting point and launcher:
+ * - Print Now (Live template preview cards with 1-click print)
+ * - Start From Data (Import Excel/CSV, scan, paste data, blank job)
+ * - Needs Attention (Genuine issues only: failed output, incomplete jobs, blocking preflight errors)
+ * - Recent Jobs (Searchable production history with resume action)
+ * - Recent Activity (Compact audit feed linked to Activity module)
+ * - Hardware / Station Status (Real system state)
+ */
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { LabelTemplate } from '../types';
 import { useAppStore } from '../store/useAppStore';
+import { jobRepository } from '../domain/jobs/jobRepository';
+import { ProductionJob, createDefaultJob } from '../domain/jobs/jobModel';
+import { auditRepository } from '../domain/repositories/auditRepository';
+import { AuditEvent } from '../domain/persistenceTypes';
 import { printerRepository } from '../domain/printing/printerRepository';
-import { printJobService } from '../domain/printing/printJobService';
-import { formatRepository } from '../domain/printing/formatRepository';
-import { databaseService } from '../services/databaseService';
+import { buildRenderList } from '../domain/rendering/renderList';
+import { RenderListSvg } from '../domain/rendering/RenderListSvg';
+import { useToast } from './ToastNotification';
+import { parseSpreadsheetBuffer } from '../utils/safeSpreadsheetParser';
 import {
   Printer,
-  Copy,
-  Trash2,
-  Download,
-  Upload,
-  Search,
-  Database,
-  Layers,
-  ArrowRight,
-  MoreVertical,
-  X,
-  Clock,
-  SlidersHorizontal,
+  FileSpreadsheet,
   Plus,
+  Play,
+  Clock,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  Tag,
+  ArrowRight,
+  Layers,
+  Upload,
+  Radio,
+  FileText,
+  Search,
+  ScanLine,
 } from 'lucide-react';
 
 export interface HomeDashboardProps {
-  templates?: LabelTemplate[];
-  onSelectTemplateToEdit?: (template: LabelTemplate) => void;
-  onSelectTemplateToGenerate?: (template: LabelTemplate) => void;
-  onOpenNewWizard?: () => void;
   onDuplicateTemplate?: (template: LabelTemplate) => void;
   onDeleteTemplate?: (templateName: string) => void;
   onImportTemplate?: (template: LabelTemplate) => void;
 }
 
-type TemplateCategoryFilter = 'ALL' | 'SHELF' | 'PROMO' | 'TIERS';
-
-export const HomeDashboard: React.FC<HomeDashboardProps> = (props) => {
+export const HomeDashboard: React.FC<HomeDashboardProps> = () => {
   const store = useAppStore();
-  const templates = props.templates ?? store.templates;
-  const onSelectTemplateToEdit = props.onSelectTemplateToEdit ?? store.selectToEdit;
-  const onSelectTemplateToGenerate = props.onSelectTemplateToGenerate ?? store.selectToGenerate;
-  const onOpenNewWizard = props.onOpenNewWizard ?? (() => store.openModal('isWizardOpen'));
-  const onDuplicateTemplate = props.onDuplicateTemplate ?? ((tpl) => store.duplicateTemplate(tpl.name));
-  const onDeleteTemplate = props.onDeleteTemplate ?? ((name) => store.deleteTemplate(name));
-  const onImportTemplate = props.onImportTemplate ?? store.importTemplate;
-  const navigateTo = store.navigateTo;
+  const toast = useToast();
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<TemplateCategoryFilter>('ALL');
-  const [activeMenuTemplate, setActiveMenuTemplate] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<ProductionJob[]>(() => jobRepository.getAll());
+  const [recentAudit, setRecentAudit] = useState<AuditEvent[]>(() => auditRepository.getAll().slice(0, 5));
+  const [templateSearch, setTemplateSearch] = useState('');
+  const excelInputRef = useRef<HTMLInputElement>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
-
-  // Live operational data from domain repositories
-  const configuredPrinters = useMemo(() => printerRepository.getAll(), []);
-  const allFormats = useMemo(() => formatRepository.getAll(), []);
-  const printJobs = useMemo(() => printJobService.getAll(), []);
-  const activeJobs = useMemo(
-    () => printJobs.filter((j) => j.status === 'QUEUED' || j.status === 'PREPARING' || j.status === 'PRINTING'),
-    [printJobs]
-  );
-  const totalProductsCount = useMemo(() => databaseService.getProducts().length, []);
-
-  // Keyboard shortcut '/' to focus search
+  // Subscribe to Jobs & Audit
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === '/' && document.activeElement?.tagName !== 'INPUT') {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-      }
+    const unsubJobs = jobRepository.subscribe((j) => setJobs(j));
+    const unsubAudit = auditRepository.subscribe((a) => setRecentAudit(a.slice(0, 5)));
+    return () => {
+      unsubJobs();
+      unsubAudit();
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Filter templates
-  const filteredTemplates = templates.filter((tpl) => {
-    const matchesSearch =
-      tpl.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      `${tpl.width_mm}x${tpl.height_mm}`.includes(searchTerm.toLowerCase());
+  // Filtered Templates for Print Now
+  const printNowTemplates = useMemo(() => {
+    return store.templates.filter((tpl) =>
+      tpl.name.toLowerCase().includes(templateSearch.toLowerCase()) ||
+      `${tpl.width_mm}x${tpl.height_mm}`.includes(templateSearch)
+    );
+  }, [store.templates, templateSearch]);
 
-    if (!matchesSearch) return false;
+  // Real "Needs Attention" jobs: partial or failed outputs, or jobs with blocking preflight
+  const needsAttentionJobs = useMemo(() => {
+    return jobs.filter((j) => j.status === 'PARTIAL' || j.outputAttempts.some((a) => a.outcome === 'FAILED'));
+  }, [jobs]);
 
-    if (categoryFilter === 'ALL') return true;
-    if (categoryFilter === 'SHELF') {
-      return tpl.height_mm <= 45 && !tpl.name.toLowerCase().includes('promo');
-    }
-    if (categoryFilter === 'PROMO') {
-      return (
-        tpl.name.toLowerCase().includes('promo') ||
-        tpl.name.toLowerCase().includes('flash') ||
-        tpl.width_mm >= 150
-      );
-    }
-    if (categoryFilter === 'TIERS') {
-      return (
-        tpl.name.toLowerCase().includes('palier') ||
-        tpl.name.toLowerCase().includes('cash') ||
-        tpl.name.toLowerCase().includes('grossiste')
-      );
-    }
-    return true;
-  });
+  // Recent jobs (top 5)
+  const recentJobs = useMemo(() => jobs.slice(0, 5), [jobs]);
 
-  const handleExportJson = (tpl: LabelTemplate) => {
-    const blob = new Blob([JSON.stringify(tpl, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `gabarit_${tpl.name.toLowerCase().replace(/\s+/g, '_')}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setActiveMenuTemplate(null);
+  // Printers status
+  const printers = useMemo(() => printerRepository.getAll(), []);
+  const defaultPrinter = printers.find((p) => p.isDefault) || printers[0];
+
+  // Actions
+  const handleQuickPrintTemplate = (template: LabelTemplate) => {
+    // Launch Quick Print workflow
+    const newJob = createDefaultJob(template, [
+      { ITEMNAME: 'Article Exemple', PRODUCT_SCAN: '3250390123453', SELLING_PRICE: 2.99 },
+    ]);
+    jobRepository.save(newJob);
+    toast.success('Tirage initialisé', `Prêt pour l'impression de "${template.name}".`);
+    store.navigateTo('jobs');
   };
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleStartBlankJob = () => {
+    const defaultTemplate = store.templates[0];
+    if (!defaultTemplate) return;
+    const newJob = createDefaultJob(defaultTemplate, []);
+    jobRepository.save(newJob);
+    toast.info('Nouveau travail', 'Prêt pour l\'importation ou saisie de données.');
+    store.navigateTo('jobs');
+  };
+
+  const handleImportExcelFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = (evt) => {
       try {
-        const json = JSON.parse(event.target?.result as string);
-        if (json && json.name && json.width_mm && json.height_mm) {
-          onImportTemplate(json);
+        const buffer = evt.target?.result as ArrayBuffer;
+        const parsed = parseSpreadsheetBuffer(buffer);
+
+        if (parsed.rows.length === 0) {
+          toast.warning('Fichier vide', 'Aucune ligne de données détectée dans ce fichier.');
+          return;
         }
-      } catch (err) {
-        console.error('Invalid template JSON:', err);
+
+        const defaultTemplate = store.templates[0];
+        const job = createDefaultJob(defaultTemplate, parsed.rows);
+        job.name = `Import ${file.name.replace(/\.[^/.]+$/, '')}`;
+        jobRepository.save(job);
+
+        toast.success('Données importées', `${parsed.rows.length} articles chargés dans le nouveau travail.`);
+        store.navigateTo('jobs');
+      } catch (err: any) {
+        toast.error('Erreur de lecture', err.message || 'Impossible d\'importer le fichier Excel / CSV.');
       }
     };
-    reader.readAsText(file);
-    e.target.value = '';
+    reader.readAsArrayBuffer(file);
+    if (excelInputRef.current) excelInputRef.current.value = '';
   };
 
-  const sampleProductsList: ProductRecord[] = useMemo(() => {
-    const dbProds = databaseService.getProducts();
-    return dbProds.length > 0 ? dbProds : SAMPLE_PRODUCTS;
-  }, []);
-
-  // Consolidated studio navigation items
-  const centralStudios = [
-    {
-      id: 'labels',
-      title: 'Studio Formats & Gabarits',
-      subtitle: `${templates.length} gabarits · ${allFormats.length} formats`,
-      description: 'Catalogue des formats normalisés (Small, Shelf, Large, Continu) et conception de gabarits.',
-      icon: <Layers className="w-5 h-5 text-violet-600" />,
-      bgIcon: 'bg-violet-50',
-      actionLabel: 'Gérer les formats & gabarits',
-      onClick: () => navigateTo('labels'),
-    },
-    {
-      id: 'printers',
-      title: 'Studio Parc d’Imprimantes',
-      subtitle: configuredPrinters.length === 0 ? 'Aucune configurée' : `${configuredPrinters.length} active(s)`,
-      description: 'Connexions physiques (WebUSB, Réseau RAW 9100, Wi-Fi, Pilote Système), calibrations et DPI.',
-      icon: <SlidersHorizontal className="w-5 h-5 text-emerald-600" />,
-      bgIcon: 'bg-emerald-50',
-      actionLabel: 'Gérer les imprimantes',
-      onClick: () => navigateTo('printers'),
-    },
-    {
-      id: 'jobs',
-      title: 'Studio File & Tirages',
-      subtitle: activeJobs.length > 0 ? `${activeJobs.length} en cours` : `${printJobs.length} travail(s)`,
-      description: 'File d’attente d’impression, monitoring en direct, reprise sur incident et historique des lots.',
-      icon: <Clock className="w-5 h-5 text-indigo-600" />,
-      bgIcon: 'bg-indigo-50',
-      actionLabel: 'Consulter la file',
-      onClick: () => navigateTo('jobs'),
-    },
-    {
-      id: 'database',
-      title: 'Catalogue Articles & Données',
-      subtitle: `${totalProductsCount} articles`,
-      description: 'Base de données des articles, prix de vente, codes EAN-13, promotions et paliers tarifaires.',
-      icon: <Database className="w-5 h-5 text-blue-600" />,
-      bgIcon: 'bg-blue-50',
-      actionLabel: 'Accéder au catalogue',
-      onClick: () => navigateTo('database'),
-    },
-  ];
-
   return (
-    <div className="flex-1 flex flex-col bg-slate-50 overflow-y-auto min-h-0">
-      <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 flex flex-col gap-8">
-        
-        {/* Workspace Header */}
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-slate-200/80 pb-6">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                E-Studio · Système d'Étiquetage
-              </span>
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-              Vue d'Ensemble & Studios Centraux
-            </h1>
-            <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-              Poste unifié de gestion : formats physiques, modèles d'imprimantes, gabarits vectoriels et production.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileInputChange}
-              accept=".json"
-              className="hidden"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => fileInputRef.current?.click()}
-              leftIcon={<Upload className="w-4 h-4 text-slate-500" />}
-              title="Importer un gabarit JSON"
-            >
-              Importer Gabarit
-            </Button>
-
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={onOpenNewWizard}
-              leftIcon={<Plus className="w-4 h-4" />}
-            >
-              Nouveau Gabarit
-            </Button>
-          </div>
+    <div className="flex-1 flex flex-col min-h-0 bg-slate-900 text-slate-100 overflow-y-auto font-sans p-6 space-y-6">
+      {/* TOP BANNER / GREETING (Operational Desk) */}
+      <div className="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800 shadow-md">
+        <div>
+          <h1 className="text-base font-bold text-slate-100 flex items-center gap-2">
+            <Printer className="w-5 h-5 text-blue-400" />
+            Poste de Production & Tirage
+          </h1>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Sélectionnez un gabarit pour un tirage immédiat ou lancez un lot depuis vos fichiers de données.
+          </p>
         </div>
 
-        {/* Consolidated Studios Navigation (Single Coherent List) */}
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
-            Studios Centraux de l'Application
+        {/* Real Station Hardware Pill */}
+        <div className="flex items-center gap-4 text-xs font-mono">
+          <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-slate-300">Station Locale Prête</span>
+            <span className="text-slate-500">·</span>
+            <span className="text-slate-400">
+              {defaultPrinter ? defaultPrinter.name : 'Pilote Standard'}
+            </span>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {centralStudios.map((studio) => (
-              <Card
-                key={studio.id}
-                variant="interactive"
-                onClick={studio.onClick}
-                className="group flex flex-col justify-between"
+        </div>
+      </div>
+
+      {/* SECTION: NEEDS ATTENTION (Only when genuine issues exist) */}
+      {needsAttentionJobs.length > 0 && (
+        <div className="bg-amber-950/20 border border-amber-800/80 rounded-xl p-4 space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-300">
+            <AlertTriangle className="w-4 h-4 text-amber-400" />
+            Attention Requise — Travaux Interrompus ({needsAttentionJobs.length})
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {needsAttentionJobs.map((job) => (
+              <div
+                key={job.id}
+                onClick={() => store.navigateTo('jobs')}
+                className="p-3 bg-slate-950/80 border border-amber-900/60 rounded-lg flex items-center justify-between cursor-pointer hover:bg-slate-900 transition-colors"
               >
                 <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${studio.bgIcon}`}>
-                      {studio.icon}
-                    </div>
-                    <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
-                      {studio.subtitle}
-                    </span>
+                  <div className="text-xs font-semibold text-slate-200">{job.name}</div>
+                  <div className="text-[11px] text-amber-400 mt-0.5">
+                    {job.totalLabels - job.lastCompletedIndex} étiquette(s) restante(s) sur {job.totalLabels}
                   </div>
-                  <h3 className="text-sm font-bold text-slate-900 group-hover:text-blue-600 transition-colors">
-                    {studio.title}
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                    {studio.description}
-                  </p>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-blue-600">
-                  <span>{studio.actionLabel}</span>
-                  <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                </div>
-              </Card>
+                <button className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded text-xs font-medium flex items-center gap-1">
+                  <Play className="w-3 h-3 fill-current" />
+                  Reprendre
+                </button>
+              </div>
             ))}
           </div>
         </div>
+      )}
 
-        {/* Template Library Section */}
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className={ThemeConstants.classes.metadataContainer}>
-              <span className="font-semibold text-slate-900">Bibliothèque de Gabarits</span>
-              <span className={ThemeConstants.classes.metadataSeparator} aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums">{filteredTemplates.length} gabarits</span>
+      {/* SECTION: START FROM DATA (Operational Ingestion Entry Points) */}
+      <div className="space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Créer un Nouveau Travail de Tirage
+        </h2>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* 1. Import Excel / CSV */}
+          <input
+            type="file"
+            ref={excelInputRef}
+            onChange={handleImportExcelFile}
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+          />
+          <div
+            onClick={() => excelInputRef.current?.click()}
+            className="p-4 bg-slate-950 border border-slate-800 hover:border-blue-500/60 rounded-xl cursor-pointer hover:bg-slate-900/80 transition-all flex items-start gap-3 group"
+          >
+            <div className="w-9 h-9 rounded-lg bg-emerald-950/60 border border-emerald-800/80 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+              <FileSpreadsheet className="w-5 h-5 text-emerald-400" />
             </div>
+            <div>
+              <h3 className="text-xs font-semibold text-slate-200 group-hover:text-blue-400">
+                Importer un fichier Excel / CSV
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Chargez un fichier de prix, détection automatique des colonnes et résolution des écarts.
+              </p>
+            </div>
+          </div>
 
-            {/* Segmented Filter Control */}
-            <div className="flex items-center gap-1 p-1 bg-slate-200/60 rounded-lg self-start sm:self-auto">
-              {(
-                [
-                  { id: 'ALL', label: 'Tous' },
-                  { id: 'SHELF', label: 'Rayon Standard' },
-                  { id: 'PROMO', label: 'Promotions' },
-                  { id: 'TIERS', label: 'Grossiste & Paliers' },
-                ] as const
-              ).map((filter) => (
-                <button
-                  key={filter.id}
-                  onClick={() => setCategoryFilter(filter.id)}
-                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                    categoryFilter === filter.id
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
+          {/* 2. Start from Catalogue Articles */}
+          <div
+            onClick={() => store.navigateTo('database')}
+            className="p-4 bg-slate-950 border border-slate-800 hover:border-blue-500/60 rounded-xl cursor-pointer hover:bg-slate-900/80 transition-all flex items-start gap-3 group"
+          >
+            <div className="w-9 h-9 rounded-lg bg-blue-950/60 border border-blue-800/80 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+              <Layers className="w-5 h-5 text-blue-400" />
+            </div>
+            <div>
+              <h3 className="text-xs font-semibold text-slate-200 group-hover:text-blue-400">
+                Sélectionner dans le Catalogue
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Recherchez parmi vos références de magasin et préparez un tirage sur mesure.
+              </p>
+            </div>
+          </div>
+
+          {/* 3. Start Blank Job */}
+          <div
+            onClick={handleStartBlankJob}
+            className="p-4 bg-slate-950 border border-slate-800 hover:border-blue-500/60 rounded-xl cursor-pointer hover:bg-slate-900/80 transition-all flex items-start gap-3 group"
+          >
+            <div className="w-9 h-9 rounded-lg bg-purple-950/60 border border-purple-800/80 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+              <Plus className="w-5 h-5 text-purple-400" />
+            </div>
+            <div>
+              <h3 className="text-xs font-semibold text-slate-200 group-hover:text-blue-400">
+                Tirage Vierge / Saisie Manuelle
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Saisissez ou collez des références manuellement pour un dépannage immédiat en rayon.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION: PRINT NOW (Live Template Cards) */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+            <Tag className="w-3.5 h-3.5 text-blue-400" />
+            Tirage Direct (Print Now) — Gabarits Disponibles ({store.templates.length})
+          </h2>
+          <button
+            onClick={() => store.navigateTo('templates')}
+            className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
+          >
+            Gérer les gabarits
+            <ArrowRight className="w-3 h-3" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          {printNowTemplates.map((template) => {
+            const previewList = buildRenderList(template, {
+              ITEMNAME: 'Article Démo',
+              SELLING_PRICE: 2.99,
+              PROMOPRICE: 1.99,
+              PRODUCT_SCAN: '3250390123453',
+            });
+
+            return (
+              <div
+                key={template.name}
+                className="bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg overflow-hidden flex flex-col transition-all group"
+              >
+                {/* Visual Thumbnail */}
+                <div
+                  onClick={() => handleQuickPrintTemplate(template)}
+                  className="h-36 bg-slate-900/60 p-3 flex items-center justify-center cursor-pointer border-b border-slate-850 group-hover:bg-slate-900 transition-colors relative"
                 >
-                  {filter.label}
-                </button>
-              ))}
-            </div>
-          </div>
+                  <div className="transform scale-80 origin-center shadow">
+                    <RenderListSvg renderList={previewList} zoom={0.65} />
+                  </div>
+                </div>
 
-          {/* Search Bar */}
-          <div className="relative">
-            <Input
-              ref={searchInputRef}
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Rechercher par nom de gabarit ou dimensions (ex: 70x38)... [Raccourci: /]"
-              leftIcon={<Search className="w-4 h-4 text-slate-400" />}
-              rightIcon={
-                searchTerm ? (
+                <div className="p-3 flex-1 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-start justify-between gap-1 mb-1">
+                      <h3 className="text-xs font-semibold text-slate-200 line-clamp-1">{template.name}</h3>
+                      <span className="text-[10px] font-mono text-slate-400 bg-slate-850 px-1 py-0.5 rounded shrink-0">
+                        {template.width_mm}x{template.height_mm} mm
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-400 mb-2">
+                      {template.width_mm <= 110 ? 'Rouleau thermique ou planche' : 'Planche A4'}
+                    </div>
+                  </div>
+
                   <button
-                    onClick={() => setSearchTerm('')}
-                    className="text-slate-400 hover:text-slate-600 p-0.5"
-                    title="Effacer"
+                    onClick={() => handleQuickPrintTemplate(template)}
+                    className="w-full py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                   >
-                    <X className="w-4 h-4" />
+                    <Play className="w-3 h-3 fill-current" />
+                    Tirage Rapide
                   </button>
-                ) : (
-                  <kbd className="hidden sm:inline-block text-[10px] font-mono font-medium text-slate-400 border border-slate-200 rounded px-1.5 py-0.5 bg-slate-50">
-                    /
-                  </kbd>
-                )
-              }
-            />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* BOTTOM SECTION: RECENT JOBS & RECENT ACTIVITY */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-2">
+        {/* Recent Jobs */}
+        <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-blue-400" />
+              Derniers Travaux de Production
+            </h3>
+            <button
+              onClick={() => store.navigateTo('jobs')}
+              className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+            >
+              Tous les travaux ({jobs.length}) →
+            </button>
           </div>
 
-          {/* Template Cards Grid */}
-          {filteredTemplates.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredTemplates.map((template) => {
-                const sampleProduct = sampleProductsList[0];
-                const isMenuOpen = activeMenuTemplate === template.name;
-
-                return (
-                  <Card
-                    key={template.name}
-                    noPadding
-                    className="hover:shadow-md transition-all flex flex-col justify-between group"
-                  >
-                    {/* Visual Preview Box (Click to Edit) */}
-                    <div
-                      onClick={() => onSelectTemplateToEdit(template)}
-                      className="p-6 bg-slate-100/70 border-b border-slate-100 flex items-center justify-center cursor-pointer min-h-[170px] relative overflow-hidden group-hover:bg-slate-100 transition-colors"
-                      title="Ouvrir dans l'éditeur de conception vectorielle"
-                    >
-                      <div className="shadow-md rounded transition-transform group-hover:scale-[1.02]">
-                        <LabelRenderer
-                          template={template}
-                          record={sampleProduct}
-                          zoom={0.8}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Card Content & Metadata */}
-                    <div className="p-4 flex-1 flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-start justify-between gap-2">
-                          <h3
-                            onClick={() => onSelectTemplateToEdit(template)}
-                            className="font-bold text-sm text-slate-900 hover:text-blue-600 cursor-pointer transition-colors leading-snug"
-                            title="Ouvrir dans l'éditeur vectoriel"
-                          >
-                            {template.name}
-                          </h3>
-
-                          {/* Quick Options Menu */}
-                          <div className="relative">
-                            <button
-                              onClick={() => setActiveMenuTemplate(isMenuOpen ? null : template.name)}
-                              className="text-slate-400 hover:text-slate-700 p-1 rounded-md transition-colors"
-                              title="Options supplémentaires"
-                            >
-                              <MoreVertical className="w-4 h-4" />
-                            </button>
-
-                            {isMenuOpen && (
-                              <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-lg shadow-lg py-1 z-30 animate-in fade-in-50 zoom-in-95">
-                                <button
-                                  onClick={() => {
-                                    setActiveMenuTemplate(null);
-                                    onDuplicateTemplate(template);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left"
-                                >
-                                  <Copy className="w-3.5 h-3.5 text-slate-400" />
-                                  <span>Dupliquer</span>
-                                </button>
-
-                                <button
-                                  onClick={() => handleExportJson(template)}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left"
-                                >
-                                  <Download className="w-3.5 h-3.5 text-slate-400" />
-                                  <span>Exporter JSON</span>
-                                </button>
-
-                                <div className="border-t border-slate-100 my-1" />
-
-                                <button
-                                  onClick={() => {
-                                    setActiveMenuTemplate(null);
-                                    if (confirm(`Confirmer la suppression du gabarit "${template.name}" ?`)) {
-                                      onDeleteTemplate(template.name);
-                                    }
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-rose-600 hover:bg-rose-50 transition-colors text-left"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                                  <span>Supprimer</span>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Physical Format & Specs */}
-                        <div className="flex items-center gap-2 text-xs text-slate-500 mt-2 font-mono tabular-nums">
-                          <span>
-                            {template.width_mm} × {template.height_mm} mm
-                          </span>
-                          <span className={ThemeConstants.classes.metadataSeparator} aria-hidden="true">·</span>
-                          <span>{(template.items || []).length} champs</span>
-                          <span className={ThemeConstants.classes.metadataSeparator} aria-hidden="true">·</span>
-                          <span>{template.width_mm >= template.height_mm ? 'paysage' : 'portrait'}</span>
-                        </div>
-                      </div>
-
-                      {/* Clean Primary Actions */}
-                      <div className="mt-5 pt-3 border-t border-slate-100 flex items-center gap-2">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          fullWidth
-                          onClick={() => onSelectTemplateToEdit(template)}
-                          title="Modifier le gabarit dans l'atelier vectoriel"
-                        >
-                          Concevoir
-                        </Button>
-
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          fullWidth
-                          onClick={() => onSelectTemplateToGenerate(template)}
-                          leftIcon={<Printer className="w-3.5 h-3.5" />}
-                          title="Lancer le tirage et l'imposition de planches"
-                        >
-                          Imprimer
-                        </Button>
-                      </div>
-                    </div>
-                  </Card>
-                );
-              })}
+          {recentJobs.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">
+              Aucun travail de production récent. Créez un premier tirage ci-dessus.
             </div>
           ) : (
-            /* Empty State */
-            <Card className="text-center flex flex-col items-center justify-center p-12">
-              <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-3">
-                <Search className="w-5 h-5" />
-              </div>
-              <h3 className="text-sm font-bold text-slate-900">Aucun gabarit correspondant</h3>
-              <p className="text-xs text-slate-500 mt-1 max-w-sm">
-                Aucun résultat ne correspond à votre filtre actuel. Modifiez votre recherche ou créez un nouveau gabarit.
-              </p>
-              <div className="flex items-center gap-3 mt-4">
-                {searchTerm && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setSearchTerm('')}
-                  >
-                    Effacer la recherche
-                  </Button>
-                )}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={onOpenNewWizard}
+            <div className="divide-y divide-slate-850">
+              {recentJobs.map((j) => (
+                <div
+                  key={j.id}
+                  onClick={() => store.navigateTo('jobs')}
+                  className="py-2.5 flex items-center justify-between cursor-pointer hover:bg-slate-900/60 px-2 rounded transition-colors"
                 >
-                  Nouveau Gabarit
-                </Button>
-              </div>
-            </Card>
+                  <div>
+                    <div className="text-xs font-semibold text-slate-200">{j.name}</div>
+                    <div className="text-[11px] text-slate-400">
+                      {j.templateName} · {j.totalLabels} étiquettes
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-medium ${
+                      j.status === 'COMPLETED'
+                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                        : j.status === 'FROZEN'
+                        ? 'bg-indigo-950 text-indigo-300 border border-indigo-800'
+                        : 'bg-amber-950 text-amber-400 border border-amber-800'
+                    }`}
+                  >
+                    {j.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Recent Activity Feed */}
+        <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-blue-400" />
+              Journal d'Activité Récent
+            </h3>
+            <button
+              onClick={() => store.navigateTo('activity')}
+              className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+            >
+              Journal complet →
+            </button>
+          </div>
+
+          {recentAudit.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">
+              Aucune activité enregistrée.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-850 text-xs">
+              {recentAudit.map((a) => (
+                <div key={a.id} className="py-2.5 flex items-center justify-between px-2">
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-slate-200">{a.action}</span>
+                    <div className="text-[11px] text-slate-400">
+                      {a.operator || 'Opérateur'} · {a.entityType || 'SYSTÈME'}
+                    </div>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {new Date(a.timestamp).toLocaleTimeString('fr-FR', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>

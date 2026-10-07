@@ -10,6 +10,8 @@ import pptxgen from 'pptxgenjs';
 import { LabelTemplate, ProductRecord, ImpositionCalculation, ImpositionConfig, PdfExportConfig } from '../types';
 import { HeadlessCanvasRenderer } from '../utils/headlessCanvasRenderer';
 import { PptxExporter } from '../utils/pptxExporter';
+import { compileTemplateToIR } from './rendering/compileTemplateToIR';
+import { drawSceneToPdf } from './rendering/adapters/pdfVectorAdapter';
 
 export interface ExportProgressEvent {
   current: number;
@@ -107,6 +109,96 @@ export class ExportService {
         if (imgData) {
           doc.addImage(imgData, 'PNG', x, y, template.width_mm, template.height_mm);
         }
+
+        // Cut / crop marks
+        if (impositionConfig.show_cut_marks) {
+          doc.setDrawColor(180, 180, 180);
+          doc.setLineWidth(0.15);
+          doc.line(x - 2, y, x + 2, y);
+          doc.line(x, y - 2, x, y + 2);
+          doc.line(x + template.width_mm - 2, y + template.height_mm, x + template.width_mm + 2, y + template.height_mm);
+          doc.line(x + template.width_mm, y + template.height_mm - 2, x + template.width_mm, y + template.height_mm + 2);
+        }
+      }
+    }
+
+    if (onProgress) {
+      onProgress({ current: products.length, total: products.length, percentage: 100, phase: 'done' });
+    }
+
+    return doc;
+  }
+
+  /**
+   * Generates a high-speed, 100% Vector-Native PDF batch using the Unified Render IR (Phase 2).
+   * Renders native vectors (lines, rectangles, vector text, barcodes) directly into jsPDF
+   * for sub-second generation and infinite scalability.
+   */
+  public static async generateNativeVectorPdfBatchAsync(
+    template: LabelTemplate,
+    products: ProductRecord[],
+    imposition: ImpositionCalculation,
+    impositionConfig: ImpositionConfig,
+    pdfConfig: PdfExportConfig = {
+      dpi: 300,
+      bleed_mm: 2.0,
+      show_crop_marks: true,
+      show_registration_marks: false,
+      include_calibration_layer: false,
+      color_mode: 'cmyk_sim',
+    },
+    onProgress?: (event: ExportProgressEvent) => void
+  ): Promise<jsPDF> {
+    const isLandscape = impositionConfig.orientation === 'landscape';
+    const pdfFormat =
+      impositionConfig.page_size === 'CUSTOM' && impositionConfig.custom_page_w_mm && impositionConfig.custom_page_h_mm
+        ? [impositionConfig.custom_page_w_mm, impositionConfig.custom_page_h_mm]
+        : impositionConfig.page_size.toLowerCase();
+
+    const doc = new jsPDF({
+      orientation: isLandscape ? 'landscape' : 'portrait',
+      unit: 'mm',
+      format: pdfFormat as any,
+    });
+
+    const labelsPerPage = imposition.total_per_page;
+    const startOffset = Math.max(0, Math.min(labelsPerPage - 1, impositionConfig.start_offset_slot || 0));
+    const totalItemsToPlace = products.length + startOffset;
+    const totalPages = Math.max(1, Math.ceil(totalItemsToPlace / labelsPerPage));
+
+    const gapX = Math.max(0, impositionConfig.gap_x_mm ?? impositionConfig.gap_mm ?? 2.0);
+    const gapY = Math.max(0, impositionConfig.gap_y_mm ?? impositionConfig.gap_mm ?? 2.0);
+
+    let productCursor = 0;
+
+    for (let page = 0; page < totalPages; page++) {
+      if (page > 0) doc.addPage();
+
+      if (onProgress) {
+        onProgress({
+          current: Math.min(products.length, productCursor + 1),
+          total: products.length,
+          percentage: Math.round(((page + 1) / totalPages) * 100),
+          phase: 'rendering',
+        });
+      }
+
+      for (let slot = 0; slot < labelsPerPage; slot++) {
+        if (page === 0 && slot < startOffset) continue;
+        if (productCursor >= products.length) break;
+
+        const prod = products[productCursor];
+        productCursor++;
+
+        const col = slot % imposition.cols;
+        const row = Math.floor(slot / imposition.cols);
+
+        const x = imposition.horizontal_offset_mm + col * (imposition.label_total_w_mm + gapX);
+        const y = imposition.vertical_offset_mm + row * (imposition.label_total_h_mm + gapY);
+
+        // Compile to Render IR and draw directly via vector primitives
+        const scene = compileTemplateToIR(template, prod, { dpi: pdfConfig.dpi || 300 });
+        drawSceneToPdf(doc, scene, { offsetXmm: x, offsetYmm: y });
 
         // Cut / crop marks
         if (impositionConfig.show_cut_marks) {

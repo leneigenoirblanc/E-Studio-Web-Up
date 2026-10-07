@@ -1,12 +1,12 @@
-import express from 'express';
+import type { Response } from 'express';
 
-const liveClients: express.Response[] = [];
+const liveClients: Response[] = [];
 
-export function registerSSEClient(res: express.Response) {
+export function registerSSEClient(res: Response) {
   liveClients.push(res);
 }
 
-export function unregisterSSEClient(res: express.Response) {
+export function unregisterSSEClient(res: Response) {
   const idx = liveClients.indexOf(res);
   if (idx !== -1) {
     liveClients.splice(idx, 1);

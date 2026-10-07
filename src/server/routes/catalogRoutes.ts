@@ -1,7 +1,8 @@
-import { Router, Request, Response } from 'express';
-import { serverStateManager, serverState, AVAILABLE_TEMPLATES } from '../state';
-import { broadcastLiveEvent } from '../sse';
-import { CatalogItem } from '../types';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { serverStateManager, serverState, AVAILABLE_TEMPLATES } from '../state.ts';
+import { broadcastLiveEvent } from '../sse.ts';
+import type { CatalogItem } from '../types.ts';
 
 export const catalogRouter = Router();
 

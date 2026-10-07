@@ -1,5 +1,6 @@
-import { Router, Request, Response } from 'express';
-import { serverState } from '../state';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { serverState } from '../state.ts';
 
 export const devicesRouter = Router();
 

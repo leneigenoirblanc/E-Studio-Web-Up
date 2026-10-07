@@ -1,8 +1,9 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
 import crypto from 'crypto';
-import { serverStateManager, serverState, AVAILABLE_TEMPLATES } from '../state';
-import { broadcastLiveEvent } from '../sse';
-import { DeviceRecord } from '../types';
+import { serverStateManager, serverState, AVAILABLE_TEMPLATES } from '../state.ts';
+import { broadcastLiveEvent } from '../sse.ts';
+import type { DeviceRecord } from '../types.ts';
 
 export const stationRouter = Router();
 

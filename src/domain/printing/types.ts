@@ -165,6 +165,7 @@ export interface PrinterInstance {
   printSpeedIps?: number; // 2-14
   defaultLabelFormatId?: string;
   defaultTemplateId?: string;
+  isDefault?: boolean;
   status: PrinterStatus;
   statusMessage?: string;
   createdAt: number;

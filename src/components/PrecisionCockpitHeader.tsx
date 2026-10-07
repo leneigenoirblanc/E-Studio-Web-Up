@@ -113,7 +113,7 @@ export const PrecisionCockpitHeader: React.FC<PrecisionCockpitHeaderProps> = ({
     }
   };
 
-  // Keyboard navigation shortcuts: Alt+1..4, Ctrl+K, F
+  // Keyboard navigation shortcuts: Alt+1..5, Ctrl+K, F
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -122,13 +122,19 @@ export const PrecisionCockpitHeader: React.FC<PrecisionCockpitHeaderProps> = ({
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
         if (e.key === '1') {
           e.preventDefault();
-          setMode('design');
+          store.navigateTo('home');
         } else if (e.key === '2') {
           e.preventDefault();
-          setMode('data');
+          store.navigateTo('templates');
         } else if (e.key === '3') {
           e.preventDefault();
-          setMode('print');
+          store.navigateTo('jobs');
+        } else if (e.key === '4') {
+          e.preventDefault();
+          store.navigateTo('activity');
+        } else if (e.key === '5') {
+          e.preventDefault();
+          store.navigateTo('settings');
         }
       }
 
@@ -321,28 +327,34 @@ export const PrecisionCockpitHeader: React.FC<PrecisionCockpitHeaderProps> = ({
         )}
       </div>
 
-      {/* CENTER ZONE: 3 Workspaces Switcher + Global Command Search + Undo/Redo + Zoom */}
+      {/* CENTER ZONE: 5 Canonical Destinations Switcher + Global Command Search */}
       <div className="flex items-center gap-2 sm:gap-3">
-        {/* Segmented Mode Switcher (3 Workspaces) */}
+        {/* Segmented Mode Switcher */}
         <nav className="flex items-center bg-slate-800/90 rounded-lg p-0.5 border border-slate-700/80 text-xs">
           {[
-            { id: 'design', label: 'Design', shortcut: 'Alt+1' },
-            { id: 'data', label: 'Data', shortcut: 'Alt+2' },
-            { id: 'print', label: 'Print', shortcut: 'Alt+3' },
-          ].map((mode) => {
-            const isActive = currentMode === mode.id;
+            { id: 'home', label: 'Accueil', shortcut: 'Alt+1' },
+            { id: 'templates', label: 'Gabarits', shortcut: 'Alt+2' },
+            { id: 'jobs', label: 'Travaux', shortcut: 'Alt+3' },
+            { id: 'activity', label: 'Activité', shortcut: 'Alt+4' },
+            { id: 'settings', label: 'Paramètres', shortcut: 'Alt+5' },
+          ].map((dest) => {
+            const isActive =
+              store.currentView === dest.id ||
+              (dest.id === 'templates' && store.currentView === 'editor') ||
+              (dest.id === 'jobs' && (store.currentView === 'generation' || store.currentView === 'database'));
+
             return (
               <button
-                key={mode.id}
-                onClick={() => setMode(mode.id as CockpitMode)}
+                key={dest.id}
+                onClick={() => store.navigateTo(dest.id as AppView)}
                 className={`px-3 py-1 rounded text-xs font-semibold transition-all relative ${
                   isActive
                     ? 'bg-blue-600 text-white font-bold shadow-xs'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
                 }`}
-                title={`Passer en mode ${mode.label} (${mode.shortcut})`}
+                title={`Naviguer vers ${dest.label} (${dest.shortcut})`}
               >
-                <span>{mode.label}</span>
+                <span>{dest.label}</span>
               </button>
             );
           })}

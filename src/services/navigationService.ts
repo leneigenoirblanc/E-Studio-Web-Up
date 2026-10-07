@@ -1,4 +1,14 @@
-export type AppView = 'home' | 'editor' | 'generation' | 'database' | 'labels' | 'printers' | 'jobs';
+export type AppView =
+  | 'home'
+  | 'templates'
+  | 'editor'
+  | 'jobs'
+  | 'activity'
+  | 'settings'
+  | 'generation'
+  | 'database'
+  | 'labels'
+  | 'printers';
 
 export interface RouteState {
   view: AppView;
@@ -34,16 +44,20 @@ class NavigationService {
 
     if (cleanPath === 'editor' || cleanPath === 'studio') {
       view = 'editor';
+    } else if (cleanPath === 'templates' || cleanPath === 'labels' || cleanPath === 'formats') {
+      view = 'templates';
+    } else if (cleanPath === 'jobs' || cleanPath === 'queue' || cleanPath === 'travaux') {
+      view = 'jobs';
+    } else if (cleanPath === 'activity' || cleanPath === 'audit' || cleanPath === 'history') {
+      view = 'activity';
+    } else if (cleanPath === 'settings' || cleanPath === 'configuration' || cleanPath === 'preferences') {
+      view = 'settings';
     } else if (cleanPath === 'generation' || cleanPath === 'print' || cleanPath === 'imposition') {
       view = 'generation';
     } else if (cleanPath === 'database' || cleanPath === 'articles' || cleanPath === 'catalog') {
       view = 'database';
-    } else if (cleanPath === 'labels' || cleanPath === 'formats' || cleanPath === 'templates') {
-      view = 'labels';
     } else if (cleanPath === 'printers' || cleanPath === 'imprimantes') {
       view = 'printers';
-    } else if (cleanPath === 'jobs' || cleanPath === 'queue' || cleanPath === 'travaux') {
-      view = 'jobs';
     } else {
       view = 'home';
     }

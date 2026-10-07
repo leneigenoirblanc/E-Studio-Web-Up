@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
 import os from 'os';
 import net from 'net';
 import dgram from 'dgram';
@@ -278,20 +279,35 @@ printerDiscoveryRouter.get('/printers/discover', async (req: Request, res: Respo
 });
 
 // POST /api/v2/printers/probe
-// Probe specific IP/hostname and port
+// Probe specific IP/hostname and port (restricted to legitimate printer ports to prevent SSRF)
+const ALLOWED_PRINTER_PORTS = new Set([9100, 631, 515, 80, 443, 8080]);
+const FORBIDDEN_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal', 'instance-data']);
+
 printerDiscoveryRouter.post('/printers/probe', async (req: Request, res: Response) => {
   const { address, port = 9100 } = req.body || {};
-  if (!address) {
-    return res.status(400).json({ error: 'Address is required' });
+  if (!address || typeof address !== 'string') {
+    return res.status(400).json({ error: 'Valid IP address or hostname is required' });
   }
 
-  const result = await checkPort(address, Number(port) || 9100, 2500);
+  const cleanAddr = address.trim().toLowerCase();
+  if (FORBIDDEN_HOSTS.has(cleanAddr) || cleanAddr.startsWith('169.254.')) {
+    return res.status(403).json({ error: 'Probing cloud metadata or link-local endpoints is forbidden' });
+  }
+
+  const targetPort = Number(port) || 9100;
+  if (!ALLOWED_PRINTER_PORTS.has(targetPort)) {
+    return res.status(400).json({
+      error: `Port ${targetPort} not permitted. Allowed printer ports: ${Array.from(ALLOWED_PRINTER_PORTS).join(', ')}`,
+    });
+  }
+
+  const result = await checkPort(cleanAddr, targetPort, 2500);
   const suggestedModelId = matchPresetModel('', '', result.banner);
 
   return res.json({
     success: true,
-    address,
-    port: Number(port) || 9100,
+    address: cleanAddr,
+    port: targetPort,
     isReachable: result.open,
     latencyMs: result.latency,
     banner: result.banner,

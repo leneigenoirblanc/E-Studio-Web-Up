@@ -1,7 +1,8 @@
-import { Router, Request, Response } from 'express';
-import { serverStateManager, serverState } from '../state';
-import { broadcastLiveEvent } from '../sse';
-import { ImportedTable, PrintJob } from '../types';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { serverStateManager, serverState } from '../state.ts';
+import { broadcastLiveEvent } from '../sse.ts';
+import type { ImportedTable, PrintJob } from '../types.ts';
 
 export const tablesRouter = Router();
 

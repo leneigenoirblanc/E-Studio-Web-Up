@@ -1,6 +1,7 @@
-import { Router, Request, Response } from 'express';
-import { registerSSEClient, unregisterSSEClient } from '../sse';
-import { serverState } from '../state';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { registerSSEClient, unregisterSSEClient } from '../sse.ts';
+import { serverState } from '../state.ts';
 
 export const eventsRouter = Router();
 
